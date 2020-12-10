@@ -1,5 +1,6 @@
 import boto3
 import click
+import botocore
 
 session = boto3.Session(profile_name='shotty')
 ec2 = session.resource('ec2')
@@ -12,6 +13,10 @@ def filter_instances(project):
     else:
         instances = ec2.instances.all()
     return instances
+
+def has_pending_snapshot(volume):
+    snapshots = list(volume.snapshots.all())
+    return (snapshots and snapshots[0].state == "pending")
 
 #def filter_volumes(project):
 #    volumes = []
@@ -57,7 +62,11 @@ def start_instances(project):
     instances = filter_instances(project)
     for i in instances:
         print("Starting {0}...".format(i.id))
-        i.start()
+        try:
+            i.start()
+        except botocore.exceptions.ClientError as error:
+            print(" Could not start instance {0}. ".format(i.id) + str(error))
+            continue #not necessary as the loop will continue either way
     return
 
 @instances.command('stop')
@@ -67,7 +76,11 @@ def stop_instances(project):
     instances = filter_instances(project)
     for i in instances:
         print("Stopping {0}...".format(i.id))
-        i.stop()
+        try:
+            i.stop()
+        except botocore.exceptions.ClientError as error:
+            print(" Could not stop instance {0}. ".format(i.id) + str(error))
+            continue #not necessary as the loop will continue either way
     return
 
 @instances.command('snapshot')
@@ -75,10 +88,20 @@ def stop_instances(project):
 def create_snapshots(project):
     instances = filter_instances(project)
     for i in instances:
+        print("Stopping instance {0}".format(i.id))
+        i.stop()
+        i.wait_until_stopped()
         volumes = i.volumes.all()
         for v in volumes:
-            print("Creating snapshot of {0}".format(v.id))
-            v.create_snapshot(Description="Created by SnapshotAlyzer 30000")
+            if has_pending_snapshot(v):
+                print(" Skipping {0}, snapshot already in progress".format(v.id))
+            else:
+                print(" Creating snapshot of {0}".format(v.id))
+                v.create_snapshot(Description="Created by SnapshotAlyzer 30000")
+        print("Starting instance {0}".format(i.id))
+        i.start()
+        i.wait_until_running()
+    print("Job's done!!!")
     return
 
 ############################################################################
@@ -107,7 +130,8 @@ def list_volumes(project):
 
 @snapshots.command('list')
 @click.option('--project', default=None, help="Only snapshots for project (tag Project:<name>)")
-def list_snapshots(project):
+@click.option('--all', 'list_all', default=False, is_flag=True, help="List all snapshots for each volume, not just the most recent")
+def list_snapshots(project, list_all):
     "List EC2 snapshots"
     instances = filter_instances(project)
     for i in instances:
@@ -116,6 +140,7 @@ def list_snapshots(project):
             snapshots = v.snapshots.all()
             for s in snapshots:
                 print(', '.join((i.id, s.id, s.volume_id, s.start_time.strftime("%c"), s.state, s.progress)))
+                if not list_all and s.state == 'completed': break
     return
 
 
